@@ -1,0 +1,82 @@
+# Maven
+# Build your Java project and run tests with Apache Maven.
+# Add steps that analyze code, save build artifacts, deploy, and more:
+# https://docs.microsoft.com/azure/devops/pipelines/languages/java
+
+trigger:
+  branches:
+    include:
+    - main
+  paths:
+    include:
+    - app/
+    exclude:
+    - README.md
+  
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  - group : myvars
+  - name: ACRName
+    value: ahmedk8sacr
+  - name: k8sresourcegroup
+    value: rg-mydemo
+  - name: k8sname
+    value: mydemok8s
+
+stages:
+
+  - stage: buildcode
+    jobs:
+      - job:
+        steps:
+        - task: Maven@3
+          inputs:
+            mavenPomFile: '$(Build.SourcesDirectory)/app/pom.xml'
+            mavenOptions: '-Xmx3072m'
+            javaHomeOption: 'JDKVersion'
+            jdkVersionOption: '1.8'
+            jdkArchitectureOption: 'x64'
+            publishJUnitResults: true
+            goals: 'package'
+
+        - task: AzureCLI@2
+          displayName: 'Push Docker Image to ACR'
+          inputs:
+              azureSubscription: AzureConnection
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az acr login --name $(ACRName)
+                docker build -f '$(Build.SourcesDirectory)/app/dockerfile' -t $(Build.Repository.Name):$(Build.BuildId) .
+                docker tag $(Build.Repository.Name):$(Build.BuildId) $(ACRName).azurecr.io/$(Build.Repository.Name):$(Build.BuildId)
+                docker push $(ACRName).azurecr.io/$(Build.Repository.Name):$(Build.BuildId)
+  - stage: DeployCodetoAKS
+    variables:
+     - name: image_name
+       value: $(ACRName).azurecr.io/$(Build.Repository.Name):$(Build.BuildId)
+    jobs:
+      - job: 
+        steps:
+        - task: replacetokens@3
+          displayName: 'Replace Variables in deployment file'
+          inputs:
+            targetFiles: '$(Build.SourcesDirectory)/terraform/modules/cluster/deploy_coreservices.yaml'
+            encoding: 'auto'
+            writeBOM: true
+            actionOnMissing: 'warn'
+            keepToken: false
+            tokenPrefix: '#{'
+            tokenSuffix: '}#'
+            useLegacyPattern: false
+            enableTelemetry: true
+        - task: AzureCLI@2
+          displayName: deploy image to AKS'
+          inputs:
+              azureSubscription: AzureConnection
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az aks get-credentials --resource-group $(k8sresourcegroup) --name $(k8sname)
+                kubectl apply -f '$(Build.SourcesDirectory)/terraform/modules/cluster/deployment_file.yaml'
